@@ -114,3 +114,109 @@
         (ok true)
     )
 )
+
+;; Vote on proposal
+(define-public (vote (pool-id uint) (proposal-id uint) (vote-for bool))
+    (let
+        ((proposal (unwrap! (get-proposal pool-id proposal-id) ERR_POOL_NOT_FOUND))
+         (contribution (unwrap! (get-contribution pool-id tx-sender) ERR_NOT_AUTHORIZED))
+         (voting-power (get amount contribution)))
+
+        ;; Checks
+        (asserts! (is-eq (get status proposal) u"active") ERR_VOTING_CLOSED)
+        (asserts! (is-none (get-vote pool-id proposal-id tx-sender)) ERR_ALREADY_VOTED)
+
+        ;; Record vote
+        (map-set votes
+            { pool-id: pool-id, proposal-id: proposal-id, voter: tx-sender }
+            { vote: vote-for }
+        )
+
+        ;; Update proposal votes
+        (map-set proposals
+            { pool-id: pool-id, proposal-id: proposal-id }
+            (merge proposal {
+                votes-for: (if vote-for 
+                    (+ (get votes-for proposal) voting-power)
+                    (get votes-for proposal)),
+                votes-against: (if vote-for
+                    (get votes-against proposal)
+                    (+ (get votes-against proposal) voting-power))
+            })
+        )
+        (ok true)
+    )
+)
+
+;; Execute proposal
+(define-public (execute-proposal (pool-id uint) (proposal-id uint))
+    (let
+        ((proposal (unwrap! (get-proposal pool-id proposal-id) ERR_POOL_NOT_FOUND))
+         (pool (unwrap! (get-pool pool-id) ERR_POOL_NOT_FOUND)))
+
+        ;; Checks
+        (asserts! (is-eq (get status proposal) u"active") ERR_VOTING_CLOSED)
+        (asserts! (>= (- stacks-block-height (get created-at proposal)) VOTING_PERIOD) ERR_VOTING_CLOSED)
+
+        ;; Check if proposal passed
+        (if (> (get votes-for proposal) (get votes-against proposal))
+            (begin
+                ;; Transfer funds to startup
+                (try! (as-contract (stx-transfer? 
+                    (get amount proposal)
+                    (as-contract tx-sender)
+                    (get startup proposal))))
+
+                ;; Update proposal status
+                (map-set proposals
+                    { pool-id: pool-id, proposal-id: proposal-id }
+                    (merge proposal { status: u"executed" })
+                )
+                (ok true)
+            )
+            (begin
+                ;; Update proposal status
+                (map-set proposals
+                    { pool-id: pool-id, proposal-id: proposal-id }
+                    (merge proposal { status: u"rejected" })
+                )
+                (ok false)
+            )
+        )
+    )
+)
+
+
+;; Submit proposal
+(define-public (submit-proposal 
+    (pool-id uint)
+    (startup principal)
+    (amount uint)
+    (description (string-utf8 256)))
+
+    (let
+        ((pool (unwrap! (get-pool pool-id) ERR_POOL_NOT_FOUND))
+         (new-proposal-id (+ (var-get proposal-counter) u1)))
+
+        ;; Checks
+        (asserts! (>= (get total-funds pool) PROPOSAL_THRESHOLD) ERR_BELOW_THRESHOLD)
+        (asserts! (<= amount (get total-funds pool)) ERR_INSUFFICIENT_FUNDS)
+
+        ;; Create proposal
+        (map-set proposals
+            { pool-id: pool-id, proposal-id: new-proposal-id }
+            {
+                startup: startup,
+                amount: amount,
+                description: description,
+                votes-for: u0,
+                votes-against: u0,
+                status: u"active",
+                created-at:stacks-block-height
+            }
+        )
+        (var-set proposal-counter new-proposal-id)
+        (ok new-proposal-id)
+    )
+)
+
